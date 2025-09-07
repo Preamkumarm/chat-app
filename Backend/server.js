@@ -390,47 +390,42 @@ app.get('/api/user/profile', verifyToken, async (req, res) => {
 });
 
 // Update user profile
-app.put('/api/user/profile', verifyToken, upload.single('profilePicture'), async (req, res) => {
+app.put("/api/user/profile", verifyToken, upload.single("profilePicture"), async (req, res) => {
   try {
     const updates = { name: req.body.name };
-    
     if (req.file) {
-      updates.profilePicture = req.file.path;
+      updates.profilePicture = req.file.path; // secure_url
+      updates.profilePictureId = req.file.filename; // public_id
     }
-    
     const user = await User.findByIdAndUpdate(req.user.userId, updates, { new: true });
     res.json(user);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
 // Admin routes
 
 // Create group (admin only)
-app.post('/api/admin/groups', verifyToken, upload.single('groupPicture'), async (req, res) => {
+app.post("/api/admin/groups", verifyToken, upload.single("groupPicture"), async (req, res) => {
   try {
     const admin = await User.findById(req.user.userId);
-    if (!admin.isAdmin) {
-      return res.status(403).json({ error: 'Only admins can create groups' });
-    }
-    
+    if (!admin.isAdmin) return res.status(403).json({ error: "Admins only" });
+
     const { name, description, memberIds } = req.body;
-    
     const group = new Group({
       name,
       description,
       admin: req.user.userId,
       members: memberIds ? JSON.parse(memberIds) : [],
-      groupPicture: req.file ? req.file.path : null
+      groupPicture: req.file ? req.file.path : null,
+      groupPictureId: req.file ? req.file.filename : null
     });
-    
     await group.save();
-    await group.populate('admin members', 'name phoneNumber profilePicture');
-    
+    await group.populate("admin members", "name phoneNumber profilePicture");
     res.json(group);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
@@ -501,80 +496,36 @@ app.get('/api/groups', verifyToken, async (req, res) => {
 });
 
 // Send message to group (admin only) or private message
-app.post('/api/messages', verifyToken, upload.single('file'), async (req, res) => {
+app.post("/api/messages", verifyToken, upload.single("file"), async (req, res) => {
   try {
-    const { 
-      content, 
-      messageType, 
-      groupId, 
-      recipientId, 
-      isPrivate,
-      location 
-    } = req.body;
-    
-    const user = await User.findById(req.user.userId);
-    
-    // If it's a group message, only admin can send
-    if (groupId && !isPrivate && !user.isAdmin) {
-      return res.status(403).json({ error: 'Only admin can send group messages' });
-    }
-    
+    const { content, messageType, groupId, recipientId, isPrivate, location } = req.body;
     const messageData = {
       sender: req.user.userId,
       content,
-      messageType: messageType || 'text',
-      isPrivate: isPrivate || false
+      messageType: messageType || "text",
+      isPrivate: isPrivate || false,
     };
-    
-    // Handle file upload
     if (req.file) {
       messageData.fileUrl = req.file.path;
       messageData.fileName = req.file.originalname;
       messageData.fileSize = req.file.size;
+      messageData.filePublicId = req.file.filename;
     }
-    
-    // Handle location
     if (location) {
       messageData.location = JSON.parse(location);
-      messageData.messageType = 'location';
+      messageData.messageType = "location";
     }
-    
-    // Set group or recipient
-    if (groupId) {
-      messageData.group = groupId;
-    }
-    if (recipientId) {
-      messageData.recipient = recipientId;
-      messageData.isPrivate = true;
-    }
-    
+    if (groupId) messageData.group = groupId;
+    if (recipientId) { messageData.recipient = recipientId; messageData.isPrivate = true; }
     const message = new Message(messageData);
     await message.save();
-    
-    await message.populate('sender', 'name phoneNumber profilePicture');
-    if (messageData.recipient) {
-      await message.populate('recipient', 'name phoneNumber profilePicture');
-    }
-    
-    // Emit to appropriate recipients
-    if (isPrivate && recipientId) {
-      // Private message
-      io.to(recipientId).emit('newMessage', message);
-      io.to(req.user.userId).emit('newMessage', message);
-    } else if (groupId) {
-      // Group message
-      const group = await Group.findById(groupId);
-      group.members.forEach(memberId => {
-        io.to(memberId.toString()).emit('newMessage', message);
-      });
-      io.to(group.admin.toString()).emit('newMessage', message);
-    }
-    
+    await message.populate("sender", "name phoneNumber profilePicture");
     res.json(message);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
+
 
 // Get messages for a group or private chat
 app.get('/api/messages', verifyToken, async (req, res) => {
@@ -695,37 +646,27 @@ app.get('/api/users', verifyToken, async (req, res) => {
 });
 
 // Delete message and associated Cloudinary file (admin or sender only)
-app.delete('/api/messages/:messageId', verifyToken, async (req, res) => {
+app.delete("/api/messages/:messageId", verifyToken, async (req, res) => {
   try {
     const message = await Message.findById(req.params.messageId);
-    
-    if (!message) {
-      return res.status(404).json({ error: 'Message not found' });
-    }
-    
+    if (!message) return res.status(404).json({ error: "Message not found" });
     const user = await User.findById(req.user.userId);
-    
-    // Check if user is sender or admin
     if (message.sender.toString() !== req.user.userId && !user.isAdmin) {
-      return res.status(403).json({ error: 'You can only delete your own messages or be an admin' });
+      return res.status(403).json({ error: "Not authorized" });
     }
-    
-    // Delete file from Cloudinary if exists
     if (message.filePublicId) {
-      let resourceType = 'raw';
-      if (message.messageType === 'image') resourceType = 'image';
-      if (message.messageType === 'video' || message.messageType === 'audio') resourceType = 'video';
-      
-      await deleteFromCloudinary(message.filePublicId, resourceType);
+      let type = "raw";
+      if (message.messageType === "image") type = "image";
+      if (["video", "audio"].includes(message.messageType)) type = "video";
+      await deleteFromCloudinary(message.filePublicId, type);
     }
-    
     await Message.findByIdAndDelete(req.params.messageId);
-    
-    res.json({ message: 'Message deleted successfully' });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
+    res.json({ message: "Message deleted successfully" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
+
 
 // Get file info from Cloudinary (for optimization)
 app.get('/api/file-info/:publicId', verifyToken, async (req, res) => {
